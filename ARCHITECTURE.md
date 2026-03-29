@@ -1,116 +1,127 @@
-# Search Engine Architecture
+# Local Search Engine Architecture
 
-This document describes the architecture of the Search Engine using the C4 model.
+This document describes the architecture of the Local Search Engine using the C4 model.
 
 # 1. System Context
 
-The Search Engine allows users to search documents indexed from the web.
+The Local Search Engine allows users to search files stored on their local device, including documents, media, and other files. The system indexes file names, content, and metadata to provide fast search results.
 
 ## Actors
-- User – performs searches
-- Administrator – manages indexing and system configuration
+- User – performs searches for local files
+- Administrator – configures indexing settings (e.g., root directories, ignore rules)
 
 ## External Systems
-- Internet websites (source of documents)
+- Local File System – source of files to be indexed
 
 ## Context Diagram
 
-User -> Search Engine -> Indexed Documents Database
-Administrator -> Search Engine
-Search Engine -> Internet Websites
+User -> Local Search Engine -> Indexed Files Database  
+Administrator -> Local Search Engine  
+Local Search Engine -> Local File System
+
 
 # 2. Containers
 
 The system is composed of several containers.
 
-## Web Interface
-Technology: HTML / JavaScript / React
+## User Interface
+Technology: HTML / JavaScript / React (or a desktop UI framework)
 
 Responsibilities:
-- Accept search queries
-- Display results to users
+- Accept search queries from the user
+- Display search results
+- Show file previews and metadata
 
 ## Search API
 Technology: Python / Java / Node.js
 
 Responsibilities:
-- Receive queries
-- Process search requests
-- Communicate with the index
+- Receive search queries
+- Process and interpret queries
+- Communicate with the index database
+- Return ranked results
 
 ## Indexing Service
+
 Responsibilities:
-- Crawl websites
-- Extract text
-- Build searchable index
+- Traverse the local filesystem
+- Extract file content and metadata
+- Update the searchable index
+- Detect modified files for incremental indexing
 
 ## Database / Index Store
-Technology: PostgreSQL / ElasticSearch / custom index
+Technology: PostgreSQL / SQLite / ElasticSearch
 
 Responsibilities:
-- Store indexed documents
-- Provide fast lookup for queries
+- Store indexed file information
+- Store metadata (file path, extension, timestamps)
+- Provide fast lookup for search queries
+
 
 # Container Diagram
 
-User
-  |
-  v
-Web Interface
-  |
-  v
-Search API
-  |
-  +-----> Index Database
-  |
-  +-----> Indexing Service
-             |
-             v
-        Internet Websites
+User  
+  |  
+  v  
+User Interface  
+  |  
+  v  
+Search API  
+  |  
+  +-----> Index Database  
+  |  
+  +-----> Indexing Service  
+             |  
+             v  
+        Local File System
+
 
 # 3. Components
 
-Inside the Search API container.
+Inside the **Search API** container.
 
 ## Query Controller
-Handles incoming search requests.
+Handles incoming search requests from the user interface.
 
 ## Query Processor
-Tokenizes and processes queries.
+Tokenizes and processes search queries.
 
 ## Ranking Engine
-Ranks documents based on relevance.
+Ranks matching files based on relevance.
 
 ## Result Formatter
-Formats results for the frontend.
+Formats search results and file previews for the frontend.
+
 
 # Component Diagram
 
-Search API
- ├── Query Controller
- ├── Query Processor
- ├── Ranking Engine
- └── Result Formatter
+Search API  
+ ├── Query Controller  
+ ├── Query Processor  
+ ├── Ranking Engine  
+ └── Result Formatter  
+
 
 # 4. Code (Classes)
 
 Example classes inside the Ranking Engine.
 
-class QueryParser
-class IndexSearcher
-class RankCalculator
-class ResultFormatter
+class QueryParser  
+class IndexSearcher  
+class RankCalculator  
+class ResultFormatter  
 
-Responsibilities:
 
-QueryParser
-- parseQuery()
+## Responsibilities
 
-IndexSearcher
-- searchIndex()
+### QueryParser
+- parseQuery() – parses and tokenizes user queries.
 
-RankCalculator
-- computeScore()
+### IndexSearcher
+- searchIndex() – queries the indexed database for matching files.
 
-ResultFormatter
-- formatResults()
+### RankCalculator
+- computeScore() – calculates relevance scores for search results.
+
+### ResultFormatter
+- formatResults() – formats results and prepares file previews for display.
