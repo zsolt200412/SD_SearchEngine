@@ -25,7 +25,7 @@ Local Search Engine -> Local File System
 The system is composed of several containers.
 
 ## User Interface
-Technology: HTML / JavaScript / React (or a desktop UI framework)
+Technology: Python CLI
 
 Responsibilities:
 - Accept search queries from the user
@@ -33,7 +33,7 @@ Responsibilities:
 - Show file previews and metadata
 
 ## Search API
-Technology: Python / Java / Node.js
+Technology: Python
 
 Responsibilities:
 - Receive search queries
