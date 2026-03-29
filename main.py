@@ -1,8 +1,10 @@
 from pathlib import Path
 import os
+import sys
 import argparse
 from datetime import datetime
 import sqlite3
+import time
 
 ignored_extensions = [".exe", ".dll", ".git", ".bin"]
 
@@ -14,6 +16,11 @@ def get_user_input():
     return parser.parse_args()
 
 def crawl_and_index(args):
+    subdirs = []
+    cursor.execute('SELECT path FROM stored_directories WHERE path = ?', (args.path,))
+    if cursor.fetchone() is not None:
+        print(f'Path already indexed: {args.path}')
+        return
     try:
         root_path = Path(args.path)
         if not root_path.exists():
@@ -29,6 +36,8 @@ def crawl_and_index(args):
     root_path = Path(args.path)
     for file in root_path.rglob("*"):
         try:
+            if file.is_dir():
+                subdirs.append(str(file))
             if file.is_file():
                 if file.suffix in ignored_extensions:
                     continue
@@ -62,12 +71,21 @@ def crawl_and_index(args):
             print(f'Warning: Error accessing {file}: {e}')
         except Exception as e:
             print(f'Warning: Unexpected error for {file}: {e}')
-
+    
+    cursor.execute('INSERT INTO stored_directories (path) VALUES (?)', (args.path,))
+    for subdir in subdirs:
+        cursor.execute('INSERT INTO stored_directories (path) VALUES (?)', (subdir,))
+    conn.commit()
 
 def init_db():
     conn = sqlite3.connect('file_metadata.db')
     cursor = conn.cursor()
-    cursor.execute('DROP TABLE IF EXISTS file_index')
+    cursor.execute('''
+                   CREATE TABLE IF NOT EXISTS stored_directories (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   path TEXT NOT NULL UNIQUE
+               )
+    ''')
     cursor.execute('''
     CREATE VIRTUAL TABLE IF NOT EXISTS file_index USING fts5(
     filepath UNINDEXED,   -- Path to the file (UNINDEXED because we don't search 'C:/')
@@ -81,29 +99,81 @@ def init_db():
     conn.commit()
     return conn, cursor
 
+def display_search_results(query):
+    """Display search results for a query"""
+    if not query:
+        return
+    
+    cursor.execute('''
+        SELECT filepath, filename, extension, preview 
+        FROM file_index 
+        WHERE filename MATCH ? OR content MATCH ?
+        LIMIT 5
+    ''', (query + '*', query + '*'))
+    
+    results = cursor.fetchall()
+    print(f"\n--- Results for '{query}' ({len(results)} found) ---")
+    
+    if results:
+        for i, (filepath, filename, extension, preview) in enumerate(results, 1):
+            preview_text = preview[:60].replace('\n', ' ') if preview else "No preview"
+            print(f"{i}. {filename:<40} | {extension:<6} | {preview_text}...")
+    else:
+        print("No results found.")
+
+def search_as_you_type():
+    """Real-time search as user types each character"""
+    print("\n=== Search As You Type ===")
+    print("Type to search in real-time (Backspace to delete, Ctrl+C to exit)\n")
+    
+    query = ""
+    
+    try:
+        import msvcrt
+        while True:
+            sys.stdout.write(f"\rSearch: {query:<50}")
+            sys.stdout.flush()
+            
+            if msvcrt.kbhit():
+                key = msvcrt.getch()
+                
+                if key == b'\x03':
+                    raise KeyboardInterrupt
+                
+                if key == b'\x08':
+                    query = query[:-1]
+                    continue
+                
+                if key == b'\r':  # Enter key
+                    print()
+                    continue
+                
+                try:
+                    char = key.decode('utf-8', errors='ignore')
+                    if char and char.isprintable():
+                        query += char
+                        display_search_results(query)
+                        print()
+                except:
+                    pass
+            else:
+                time.sleep(0.01)
+    
+    except KeyboardInterrupt:
+        print("\n\nSearch cancelled.")
+    except Exception as e:
+        print(f"\nError during search: {e}")
+
 def _main__():
     global conn, cursor
     conn, cursor = init_db()
     args = get_user_input()
     print(f'Root directory: {args.path}')
     crawl_and_index(args)
-    cursor.execute('SELECT * FROM file_index')
-    rows = cursor.fetchall()
-    # Print filename, extension, and preview for verification
-    # for row in rows:
-    #     print(f"Filename: {row[1]}, Extension: {row[2]}, Preview: {row[4]}...")
-    while True:
-        query = input("Enter file name to search (or 'exit' to quit): ")
-        if query.lower() == 'exit':
-            break
-        cursor.execute('SELECT filepath, filename, extension, preview FROM file_index WHERE filename MATCH ?', (query,))
-        results = cursor.fetchall()
-        if results:
-            print(f"Found {len(results)} results:")
-            for filepath, filename, extension, preview in results:
-                print(f"File: {filename} ({extension}) - Preview: {preview}...")
-        else:
-            print("No results found.")
+
+    search_as_you_type()
+
+    conn.close()
 
 if __name__ == "__main__":
     _main__()
