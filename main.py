@@ -17,6 +17,8 @@ def get_user_input():
 
 def crawl_and_index(args):
     subdirs = []
+    files_indexed = 0
+    errors = 0
     cursor.execute('SELECT path FROM stored_directories WHERE path = ?', (args.path,))
     if cursor.fetchone() is not None:
         print(f'Path already indexed: {args.path}')
@@ -33,6 +35,7 @@ def crawl_and_index(args):
         print(f'Error accessing root path: {e}')
         exit(1)
 
+    start_time = time.time()
     root_path = Path(args.path)
     for file in root_path.rglob("*"):
         try:
@@ -41,6 +44,8 @@ def crawl_and_index(args):
             if file.is_file():
                 if file.suffix in ignored_extensions:
                     continue
+
+                files_indexed += 1
                 if args.print:
                     if args.md:
                         # Print with metadata
@@ -49,7 +54,10 @@ def crawl_and_index(args):
                         print(f'{file.name:<50} | Size: {size:>10,} bytes | Modified: {modified}')
                     else:
                         print(file)
-
+                else:
+                    if files_indexed % 10 == 0:
+                        print(f'Indexed {files_indexed} files...')
+                        print(f'Encountered {errors} errors so far...')
                 content = ""
                 preview = ""
                 if file.suffix in ['.txt', '.md', '.py', '.java', '.c', '.cpp']:
@@ -59,23 +67,35 @@ def crawl_and_index(args):
                             preview = content[:50]  # Get the first 50 characters for preview
                     except Exception as e:
                         print(f'Warning: Could not read {file}: {e}')
-
-                cursor.execute('''
-                    INSERT INTO file_index (filepath, filename, extension, content, preview, modified_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (str(file), file.name, file.suffix, content, preview, datetime.now()))
-                conn.commit()
+                
+                try:
+                    cursor.execute('''
+                        INSERT INTO file_index (filepath, filename, extension, content, preview, modified_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    ''', (str(file), file.name, file.suffix, content, preview, datetime.now()))
+                    conn.commit()
+                except Exception as e:
+                    print(f'Warning: Could not insert file metadata: {e}')
         except PermissionError:
+            errors += 1
             print(f'Warning: Permission denied: {file}')
         except (OSError, IOError) as e:
+            errors += 1
             print(f'Warning: Error accessing {file}: {e}')
         except Exception as e:
+            errors += 1
             print(f'Warning: Unexpected error for {file}: {e}')
-    
-    cursor.execute('INSERT INTO stored_directories (path) VALUES (?)', (args.path,))
-    for subdir in subdirs:
-        cursor.execute('INSERT INTO stored_directories (path) VALUES (?)', (subdir,))
-    conn.commit()
+    try:
+        cursor.execute('INSERT INTO stored_directories (path) VALUES (?)', (args.path,))
+        for subdir in subdirs:
+            cursor.execute('INSERT INTO stored_directories (path) VALUES (?)', (subdir,))
+        conn.commit()
+    except Exception as e:
+        print(f'Warning: Could not store indexed path: {e}')
+
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f'Finished indexing {files_indexed} files with {errors} errors in {elapsed_time:.2f} seconds.')
 
 def init_db():
     conn = sqlite3.connect('file_metadata.db')
@@ -100,7 +120,6 @@ def init_db():
     return conn, cursor
 
 def display_search_results(query):
-    """Display search results for a query"""
     if not query:
         return
     
