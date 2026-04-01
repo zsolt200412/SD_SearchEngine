@@ -23,8 +23,29 @@ def display_search_results(cursor, query: str, limit: int = 10):
 
     if results:
         for i, (filepath, filename, extension, preview) in enumerate(results, 1):
-            preview_text = preview[:60].replace("\n", " ") if preview else "No preview"
-            print(f"{i}. {filename:<40} | {extension:<6} | {preview_text}...")
+            if preview:
+                lower_preview = preview.lower()
+                lower_query = query.lower()
+
+                idx = lower_preview.find(lower_query)
+
+                if idx != -1:
+                    start = max(idx - 30, 0)
+                    end = min(idx + len(query) + 30, len(preview))
+                    snippet = preview[start:end]
+
+                    highlighted = snippet.replace(
+                        preview[idx:idx + len(query)],
+                        f"\033[31m{preview[idx:idx + len(query)]}\033[0m"
+                    )
+
+                    preview_text = highlighted.replace("\n", " ")
+                else:
+                    preview_text = preview[:60].replace("\n", " ")
+            else:
+                preview_text = "No preview"
+
+            print(f"{i:<2}. {filename:<40} | {extension:<6} | {preview_text}...")
     else:
         print("No results found.")
 
