@@ -12,7 +12,7 @@ def display_search_results(cursor, query: str, limit: int = 10):
         SELECT filepath, filename, extension, preview
         FROM file_index
         WHERE filename MATCH ? OR content MATCH ?
-        ORDER BY (filename = ?) ASC, bm25(file_index, 10.0, 4.0, 7.0, 1.0) ASC
+        ORDER BY (filename = ?) DESC, bm25(file_index, 10.0, 4.0, 7.0, 1.0) ASC
         LIMIT ?
         """,
         (query + "*", query + "*", exact, limit),
