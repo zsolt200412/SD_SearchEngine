@@ -9,17 +9,26 @@ from .config import ignored_extensions, ignored_folders, text_extensions
 def _path_contains_ignored_folder(path: Path) -> bool:
     return any(part in ignored_folders for part in path.parts)
 
+def check_if_current_path_or_subdir_already_indexed(cursor, path: str) -> bool:
+    cursor.execute("SELECT path FROM stored_directories WHERE path = ?", (path,))
+    if cursor.fetchone() is not None:
+        return True
+
+    cursor.execute("SELECT path FROM stored_directories")
+    indexed_paths = [row[0] for row in cursor.fetchall()]
+    return any(path.startswith(indexed_path) for indexed_path in indexed_paths)
+
 
 def crawl_and_index(cursor, conn, root_dir: str, print_paths: bool = False, md: bool = False):
     subdirs = []
     files_indexed = 0
     errors = 0
 
+    # --path is optinal, so if it's not provided we just return without doing anything
     if root_dir is None:
         return
 
-    cursor.execute("SELECT path FROM stored_directories WHERE path = ?", (root_dir,))
-    if cursor.fetchone() is not None:
+    if check_if_current_path_or_subdir_already_indexed(cursor, root_dir):
         print(f"Path already indexed: {root_dir}")
         return
 
@@ -42,13 +51,16 @@ def crawl_and_index(cursor, conn, root_dir: str, print_paths: bool = False, md: 
         try:
             current_root_path = Path(current_root)
 
-            dirs[:] = [d for d in dirs if d not in ignored_folders]
+            dirs[:] = [d for d in dirs if d not in ignored_folders and not os.path.islink(current_root_path / d)]
 
             for d in dirs:
                 subdirs.append(str(current_root_path / d))
 
             for filename in files:
                 file_path = current_root_path / filename
+
+                if os.path.islink(file_path):
+                    continue
 
                 if _path_contains_ignored_folder(file_path):
                     continue
@@ -66,8 +78,7 @@ def crawl_and_index(cursor, conn, root_dir: str, print_paths: bool = False, md: 
                         print(file_path)
                 else:
                     if files_indexed % 10 == 0:
-                        print(f"Indexed {files_indexed} files...")
-                        print(f"Encountered {errors} errors so far...")
+                        print(f'Indexed {files_indexed} files, errors: {errors}, elapsed time: {time.time() - start_time:.2f} seconds, speed: {files_indexed / (time.time() - start_time):.2f} files/sec', end='\r')
 
                 content = ""
                 preview = ""

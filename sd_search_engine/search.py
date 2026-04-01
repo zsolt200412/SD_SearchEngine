@@ -2,11 +2,18 @@ import sys
 import time
 
 
-def display_search_results(cursor, query: str, limit: int = 10):
-    if not query:
-        return
+def _escape_fts_query(query: str) -> str:
+    return f'"{query}"'
 
-    exact = query
+
+def parseQuery(query: str) -> tuple:
+    if not query:
+        return "", ""
+    escaped_query = _escape_fts_query(query)
+    return escaped_query, query
+
+
+def searchIndex(cursor, escaped_query: str, exact_query: str, limit: int = 10) -> list:
     cursor.execute(
         """
         SELECT filepath, filename, extension, preview
@@ -15,39 +22,61 @@ def display_search_results(cursor, query: str, limit: int = 10):
         ORDER BY (filename = ?) DESC, bm25(file_index, 10.0, 4.0, 7.0, 1.0) ASC
         LIMIT ?
         """,
-        (query + "*", query + "*", exact, limit),
+        (escaped_query + "*", escaped_query + "*", exact_query, limit),
     )
+    return cursor.fetchall()
 
-    results = cursor.fetchall()
-    print(f"\n--- Results for '{query}' ({len(results)} found) ---")
 
-    if results:
-        for i, (filepath, filename, extension, preview) in enumerate(results, 1):
-            if preview:
-                lower_preview = preview.lower()
-                lower_query = query.lower()
+def formatResults(results: list, query: str) -> None:
+    query_colored = f"\033[36m{query}\033[0m"
+    print(f"\n\033[1m--- Results for {query_colored} ({len(results)} found) ---\033[0m")
 
-                idx = lower_preview.find(lower_query)
-
-                if idx != -1:
-                    start = max(idx - 30, 0)
-                    end = min(idx + len(query) + 30, len(preview))
-                    snippet = preview[start:end]
-
-                    highlighted = snippet.replace(
-                        preview[idx:idx + len(query)],
-                        f"\033[31m{preview[idx:idx + len(query)]}\033[0m"
-                    )
-
-                    preview_text = highlighted.replace("\n", " ")
-                else:
-                    preview_text = preview[:60].replace("\n", " ")
-            else:
-                preview_text = "No preview"
-
-            print(f"{i:<2}. {filename:<40} | {extension:<6} | {preview_text}...")
-    else:
+    if not results:
         print("No results found.")
+        return
+
+    for i, (filepath, filename, extension, preview) in enumerate(results, 1):
+        lower_filename = filename.lower()
+        lower_query = query.lower()
+        filename_idx = lower_filename.find(lower_query)
+
+        if filename_idx != -1:
+            highlighted_filename = filename.replace(
+                filename[filename_idx:filename_idx + len(query)],
+                f"\033[31m{filename[filename_idx:filename_idx + len(query)]}\033[0m"
+            )
+        else:
+            highlighted_filename = filename
+
+        if preview:
+            lower_preview = preview.lower()
+            idx = lower_preview.find(lower_query)
+
+            if idx != -1:
+                start = max(idx - 30, 0)
+                end = min(idx + len(query) + 30, len(preview))
+                snippet = preview[start:end]
+
+                highlighted = snippet.replace(
+                    preview[idx:idx + len(query)],
+                    f"\033[31m{preview[idx:idx + len(query)]}\033[0m"
+                )
+                preview_text = highlighted.replace("\n", " ")
+            else:
+                preview_text = preview[:60].replace("\n", " ")
+        else:
+            preview_text = "No preview"
+
+        print(f"{i:<2}. {highlighted_filename:<40} | {extension:<6} | {preview_text}...")
+
+
+def display_search_results(cursor, query: str, limit: int = 10):
+    if not query:
+        return
+
+    escaped_query, original_query = parseQuery(query)
+    results = searchIndex(cursor, escaped_query, original_query, limit)
+    formatResults(results, original_query)
 
 
 def search_as_you_type(cursor):
@@ -81,6 +110,7 @@ def search_as_you_type(cursor):
                     char = key.decode("utf-8", errors="ignore")
                     if char and char.isprintable():
                         query += char
+                        print(query)
                         display_search_results(cursor, query)
                         print()
                 except:
