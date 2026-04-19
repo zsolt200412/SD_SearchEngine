@@ -1,33 +1,122 @@
 import sys
 import time
+import shlex
 
 
-def _escape_fts_query(query: str) -> str:
-    return f'"{query}"'
+def _escape_fts_term(term: str):
+    escaped = term.replace('"', '""')
+    return f'"{escaped}"'
 
 
-def parseQuery(query: str) -> tuple:
+def _build_and_fts_query(terms: list[str]):
+    cleaned_terms = [s for s in (t.strip() for t in terms if t) if s]
+    if not cleaned_terms:
+        return ""
+    return " AND ".join(f"{_escape_fts_term(term)}*" for term in cleaned_terms)
+
+
+def _tokenize_query(query: str):
+    try:
+        lexer = shlex.shlex(query, posix=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        lexer.escape = ""
+        return list(lexer)
+    except ValueError:
+        return query.split()
+
+
+def parseQuery(query: str):
+    parsed = {
+        "path_terms": [],
+        "content_terms": [],
+        "general_terms": [],
+        "raw_query": query,
+    }
+
     if not query:
-        return "", ""
-    escaped_query = _escape_fts_query(query)
-    return escaped_query, query
+        return parsed
+    
+
+    for token in _tokenize_query(query):
+        if ":" in token:
+            qualifier, value = token.split(":", 1)
+            qualifier = qualifier.lower().strip()
+            value = value.strip()
+
+            if not value:
+                continue
+
+            if qualifier == "path":
+                parsed["path_terms"].append(value)
+                continue
+
+            if qualifier == "content":
+                parsed["content_terms"].append(value)
+                continue
+
+        parsed["general_terms"].append(token)
+
+    return parsed
 
 
-def searchIndex(cursor, escaped_query: str, exact_query: str, limit: int = 10) -> list:
-    cursor.execute(
-        """
+def _build_search_statement(parsed_query: dict, limit: int):
+    where_clauses = []
+    params = []
+
+    path_terms = parsed_query["path_terms"]
+    print(f"Parsed query: {parsed_query}")
+    content_terms = parsed_query["content_terms"]
+    general_terms = parsed_query["general_terms"]
+
+    for term in path_terms:
+        where_clauses.append("LOWER(filepath) LIKE ?")
+        params.append(f"%{term.lower()}%")
+
+    content_fts_query = _build_and_fts_query(content_terms)
+    general_fts_query = _build_and_fts_query(general_terms)
+
+    fts_clauses = []
+    if content_fts_query:
+        fts_clauses.append(f"content:({content_fts_query})")
+    if general_fts_query:
+        fts_clauses.append(f"({general_fts_query})")
+
+    fts_query = " AND ".join(fts_clauses)
+    use_fts = bool(fts_query)
+
+    if use_fts:
+        where_clauses.append("file_index MATCH ?")
+        params.append(fts_query)
+
+    if not where_clauses:
+        where_clauses.append("1 = 0")
+
+    order_clause = (
+        "ORDER BY bm25(file_index, 10.0, 4.0, 7.0, 1.0) ASC"
+        if use_fts
+        else "ORDER BY filename ASC"
+    )
+
+    sql = f"""
         SELECT filepath, filename, extension, preview
         FROM file_index
-        WHERE filename MATCH ? OR content MATCH ?
-        ORDER BY (filename = ?) DESC, bm25(file_index, 10.0, 4.0, 7.0, 1.0) ASC
+        WHERE {' AND '.join(where_clauses)}
+        {order_clause}
         LIMIT ?
-        """,
-        (escaped_query + "*", escaped_query + "*", exact_query, limit),
-    )
+    """
+    params.append(limit)
+    return sql, params
+
+
+def searchIndex(cursor, parsed_query: dict, limit: int = 10):
+    sql, params = _build_search_statement(parsed_query, limit)
+    print(f"Executing SQL: {sql} with params {params}")
+    cursor.execute(sql, params)
     return cursor.fetchall()
 
 
-def formatResults(results: list, query: str) -> None:
+def formatResults(results: list, query: str):
     print(f"\n--- Results for {query} ({len(results)} found) ---")
 
     if not results:
@@ -73,12 +162,21 @@ def display_search_results(cursor, query: str, limit: int = 10):
     if not query:
         return
 
-    escaped_query, original_query = parseQuery(query)
-    results = searchIndex(cursor, escaped_query, original_query, limit)
-    formatResults(results, original_query)
+    parsed_query = parseQuery(query)
+    results = searchIndex(cursor, parsed_query, limit)
+    formatResults(results, query)
+
+
+def _has_indexed_content(cursor):
+    cursor.execute("SELECT COUNT(*) FROM file_index")
+    return cursor.fetchone()[0] > 0
 
 
 def search_as_you_type(cursor):
+    if not _has_indexed_content(cursor):
+        print("\nNo indexed content found. Index your real file system first using --path.")
+        return
+
     print("\n=== Search As You Type ===")
     print("Type to search in real-time (Backspace to delete, Ctrl+C to exit)\n")
 

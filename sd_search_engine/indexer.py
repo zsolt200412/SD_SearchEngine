@@ -65,7 +65,7 @@ def crawl_and_index(cursor, conn, root_dir: str, print_paths: bool = False, md: 
                 if _path_contains_ignored_folder(file_path):
                     continue
 
-                if file_path.suffix.lower() in ignored_extensions:
+                if file_path.suffix.lower()  not in text_extensions:
                     continue
 
                 files_indexed += 1
