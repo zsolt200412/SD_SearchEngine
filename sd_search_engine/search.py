@@ -28,8 +28,7 @@ def searchIndex(cursor, escaped_query: str, exact_query: str, limit: int = 10) -
 
 
 def formatResults(results: list, query: str) -> None:
-    query_colored = f"\033[36m{query}\033[0m"
-    print(f"\n\033[1m--- Results for {query_colored} ({len(results)} found) ---\033[0m")
+    print(f"\n--- Results for {query} ({len(results)} found) ---")
 
     if not results:
         print("No results found.")
@@ -43,7 +42,7 @@ def formatResults(results: list, query: str) -> None:
         if filename_idx != -1:
             highlighted_filename = filename.replace(
                 filename[filename_idx:filename_idx + len(query)],
-                f"\033[31m{filename[filename_idx:filename_idx + len(query)]}\033[0m"
+                filename[filename_idx:filename_idx + len(query)]
             )
         else:
             highlighted_filename = filename
@@ -59,7 +58,7 @@ def formatResults(results: list, query: str) -> None:
 
                 highlighted = snippet.replace(
                     preview[idx:idx + len(query)],
-                    f"\033[31m{preview[idx:idx + len(query)]}\033[0m"
+                    preview[idx:idx + len(query)]
                 )
                 preview_text = highlighted.replace("\n", " ")
             else:
