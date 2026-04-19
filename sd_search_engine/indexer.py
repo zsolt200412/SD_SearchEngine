@@ -6,6 +6,55 @@ from datetime import datetime
 from .config import ignored_extensions, ignored_folders, text_extensions
 
 
+def _clamp(value: float, minimum: float, maximum: float):
+    return max(minimum, min(maximum, value))
+
+
+def _compute_path_score(file_path: Path, root_path: Path):
+    directory_weights = {
+        "src": 0.10,
+        "app": 0.08,
+        "lib": 0.07,
+        "docs": 0.05,
+        "tests": -0.05,
+        "test": -0.05,
+        "build": -0.10,
+        "dist": -0.10,
+        "node_modules": -0.25,
+        ".git": -0.25,
+        "__pycache__": -0.20,
+        "venv": -0.20,
+        ".venv": -0.20,
+    }
+    extension_bonus = {
+        ".cpp": 0.10,
+        ".py": 0.10,
+        ".md": 0.03,
+        ".json": 0.02,
+    }
+
+    try:
+        relative = file_path.relative_to(root_path)
+        directory_parts = relative.parts[:-1]
+    except ValueError:
+        directory_parts = file_path.parts[:-1]
+
+    base_score = 0.50
+
+    dir_weight_sum = 0.0
+    for part in directory_parts:
+        dir_weight_sum += directory_weights.get(part.lower(), 0.0)
+    dir_weight_sum = _clamp(dir_weight_sum, -0.25, 0.25)
+
+    depth = len(directory_parts)
+    depth_bonus = max(0.0, 0.20 - 0.015 * depth)
+
+    ext_bonus = extension_bonus.get(file_path.suffix.lower(), 0.0)
+
+    final_score = base_score + dir_weight_sum + depth_bonus + ext_bonus
+    return _clamp(final_score, 0.0, 1.0)
+
+
 def _path_contains_ignored_folder(path: Path) -> bool:
     return any(part in ignored_folders for part in path.parts)
 
@@ -91,12 +140,22 @@ def crawl_and_index(cursor, conn, root_dir: str, print_paths: bool = False, md: 
                         print(f"Warning: Could not read {file_path}: {e}")
 
                 try:
+                    path_score = _compute_path_score(file_path, root_path)
+                    accessed_at = datetime.fromtimestamp(file_path.stat().st_atime).isoformat(timespec="seconds")
+
                     cursor.execute(
                         """
                         INSERT INTO file_index (filepath, filename, extension, content, preview, modified_at)
                         VALUES (?, ?, ?, ?, ?, ?)
                         """,
                         (str(file_path), file_path.name, file_path.suffix, content, preview, datetime.now()),
+                    )
+                    cursor.execute(
+                        """
+                        INSERT OR REPLACE INTO file_path_scores (filepath, path_score, accessed_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (str(file_path), path_score, accessed_at),
                     )
                     conn.commit()
                 except Exception as e:

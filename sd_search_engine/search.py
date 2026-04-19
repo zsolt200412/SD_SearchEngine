@@ -3,6 +3,28 @@ import time
 import shlex
 
 
+def _order_by_relevance(use_fts: bool):
+    score_expr = "COALESCE(file_path_scores.path_score, 0.50)"
+    if use_fts:
+        return f"ORDER BY bm25(file_index, 10.0, 4.0, 7.0, 1.0) ASC, {score_expr} DESC"
+    return f"ORDER BY {score_expr} DESC, file_index.filename ASC"
+
+
+def _order_by_alphabetical(use_fts: bool):
+    return "ORDER BY file_index.filename ASC, file_index.filepath ASC"
+
+
+def _order_by_date_accessed(use_fts: bool):
+    return "ORDER BY COALESCE(file_path_scores.accessed_at, '') DESC, file_index.filename ASC"
+
+
+RANKING_STRATEGIES = {
+    "relevance": _order_by_relevance,
+    "alphabetical": _order_by_alphabetical,
+    "date-accessed": _order_by_date_accessed,
+}
+
+
 def _escape_fts_term(term: str):
     escaped = term.replace('"', '""')
     return f'"{escaped}"'
@@ -60,17 +82,16 @@ def parseQuery(query: str):
     return parsed
 
 
-def _build_search_statement(parsed_query: dict, limit: int):
+def _build_search_statement(parsed_query: dict, limit: int, ranking_strategy: str = "relevance"):
     where_clauses = []
     params = []
 
     path_terms = parsed_query["path_terms"]
-    print(f"Parsed query: {parsed_query}")
     content_terms = parsed_query["content_terms"]
     general_terms = parsed_query["general_terms"]
 
     for term in path_terms:
-        where_clauses.append("LOWER(filepath) LIKE ?")
+        where_clauses.append("LOWER(file_index.filepath) LIKE ?")
         params.append(f"%{term.lower()}%")
 
     content_fts_query = _build_and_fts_query(content_terms)
@@ -92,15 +113,13 @@ def _build_search_statement(parsed_query: dict, limit: int):
     if not where_clauses:
         where_clauses.append("1 = 0")
 
-    order_clause = (
-        "ORDER BY bm25(file_index, 10.0, 4.0, 7.0, 1.0) ASC"
-        if use_fts
-        else "ORDER BY filename ASC"
-    )
+    ordering_builder = RANKING_STRATEGIES.get(ranking_strategy, _order_by_relevance)
+    order_clause = ordering_builder(use_fts)
 
     sql = f"""
-        SELECT filepath, filename, extension, preview
+        SELECT file_index.filepath, file_index.filename, file_index.extension, file_index.preview
         FROM file_index
+        LEFT JOIN file_path_scores ON file_path_scores.filepath = file_index.filepath
         WHERE {' AND '.join(where_clauses)}
         {order_clause}
         LIMIT ?
@@ -109,9 +128,8 @@ def _build_search_statement(parsed_query: dict, limit: int):
     return sql, params
 
 
-def searchIndex(cursor, parsed_query: dict, limit: int = 10):
-    sql, params = _build_search_statement(parsed_query, limit)
-    print(f"Executing SQL: {sql} with params {params}")
+def searchIndex(cursor, parsed_query: dict, limit: int = 10, ranking_strategy: str = "relevance"):
+    sql, params = _build_search_statement(parsed_query, limit, ranking_strategy=ranking_strategy)
     cursor.execute(sql, params)
     return cursor.fetchall()
 
@@ -158,12 +176,12 @@ def formatResults(results: list, query: str):
         print(f"{i:<2}. {highlighted_filename:<40} | {extension:<6} | {preview_text}...")
 
 
-def display_search_results(cursor, query: str, limit: int = 10):
+def display_search_results(cursor, query: str, limit: int = 10, ranking_strategy: str = "relevance"):
     if not query:
         return
 
     parsed_query = parseQuery(query)
-    results = searchIndex(cursor, parsed_query, limit)
+    results = searchIndex(cursor, parsed_query, limit, ranking_strategy=ranking_strategy)
     formatResults(results, query)
 
 
@@ -172,13 +190,14 @@ def _has_indexed_content(cursor):
     return cursor.fetchone()[0] > 0
 
 
-def search_as_you_type(cursor):
+def search_as_you_type(cursor, ranking_strategy: str = "relevance"):
     if not _has_indexed_content(cursor):
         print("\nNo indexed content found. Index your real file system first using --path.")
         return
 
     print("\n=== Search As You Type ===")
     print("Type to search in real-time (Backspace to delete, Ctrl+C to exit)\n")
+    print(f"Ranking: {ranking_strategy}\n")
 
     query = ""
 
@@ -208,7 +227,7 @@ def search_as_you_type(cursor):
                     if char and char.isprintable():
                         query += char
                         print(query)
-                        display_search_results(cursor, query)
+                        display_search_results(cursor, query, ranking_strategy=ranking_strategy)
                         print()
                 except:
                     pass
