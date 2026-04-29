@@ -1,6 +1,7 @@
 import sys
 import time
 import shlex
+from datetime import datetime
 
 
 def _order_by_relevance(use_fts: bool):
@@ -23,6 +24,129 @@ RANKING_STRATEGIES = {
     "alphabetical": _order_by_alphabetical,
     "date-accessed": _order_by_date_accessed,
 }
+
+
+class SearchObserver:
+    def update(self, event_name: str, payload: dict):
+        print(f"Observer received event '{event_name}' with payload: {payload}")
+
+
+class SearchSubject:
+    def __init__(self):
+        self._observers = []
+
+    def attach(self, observer: SearchObserver):
+        self._observers.append(observer)
+
+    def notify(self, event_name: str, payload: dict):
+        for observer in self._observers:
+            observer.update(event_name, payload)
+
+
+class SearchHistoryObserver(SearchObserver):
+    def __init__(self, cursor, conn):
+        self.cursor = cursor
+        self.conn = conn
+        self.query_counts = {}
+        self.query_file_counts = {}
+        self._load_history()
+
+    def _load_history(self):
+        self.cursor.execute(
+            """
+            SELECT query, COUNT(*)
+            FROM search_history
+            GROUP BY query
+            """
+        )
+        # Store total counts for each query
+        self.query_counts = {row[0]: row[1] for row in self.cursor.fetchall()}
+
+        self.cursor.execute(
+            """
+            SELECT query, filepath, hit_count
+            FROM query_file_history
+            """
+        )
+        # Store hit counts for each query-file pair
+        for query, filepath, hit_count in self.cursor.fetchall():
+            self.query_file_counts.setdefault(query, {})[filepath] = hit_count
+
+    # Normalize query by lowercasing and collapsing whitespace
+    def _normalize_query(self, query: str):
+        return " ".join(query.lower().strip().split())
+
+    def suggest_queries(self, query_prefix: str, limit: int = 3):
+        prefix = self._normalize_query(query_prefix)
+        if len(prefix) < 2:
+            return []
+
+        matches = [
+            (query, count)
+            for query, count in self.query_counts.items()
+            if query.startswith(prefix)
+        ]
+        # Sort by count desc, then alphabetically
+        matches.sort(key=lambda item: (-item[1], item[0]))
+        return [query for query, _ in matches[:limit]]
+
+    def rerank_results(self, query: str, results: list):
+        normalized = self._normalize_query(query)
+        if not normalized:
+            return results
+
+        exact_counts = self.query_file_counts.get(normalized, {})
+        if not exact_counts:
+            return results
+
+        # Rerank results based on how many times each file was returned for this query in the past
+        indexed = list(enumerate(results))
+        indexed.sort(
+            key=lambda item: (
+                -exact_counts.get(item[1][0], 0),
+                item[0],
+            )
+        )
+        return [item[1] for item in indexed]
+
+    def update(self, event_name: str, payload: dict):
+        if event_name != "search_executed":
+            return
+
+        raw_query = payload.get("query", "")
+        normalized = self._normalize_query(raw_query)
+        if len(normalized) < 2:
+            return
+
+        results = payload.get("results", [])
+        now = datetime.now().isoformat(timespec="seconds")
+
+        self.cursor.execute(
+            """
+            INSERT INTO search_history (query, searched_at)
+            VALUES (?, ?)
+            """,
+            (normalized, now),
+        )
+
+        self.query_counts[normalized] = self.query_counts.get(normalized, 0) + 1
+
+        for filepath, *_ in results:
+            current = self.query_file_counts.setdefault(normalized, {}).get(filepath, 0) + 1
+            self.query_file_counts[normalized][filepath] = current
+            self.cursor.execute(
+                """
+                INSERT INTO query_file_history (query, filepath, hit_count, last_seen)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(query, filepath)
+                DO UPDATE SET
+                    hit_count = query_file_history.hit_count + 1,
+                    last_seen = excluded.last_seen
+                """,
+                (normalized, filepath, current, now),
+            )
+
+        self.conn.commit()
 
 
 def _escape_fts_term(term: str):
@@ -113,6 +237,7 @@ def _build_search_statement(parsed_query: dict, limit: int, ranking_strategy: st
     if not where_clauses:
         where_clauses.append("1 = 0")
 
+
     ordering_builder = RANKING_STRATEGIES.get(ranking_strategy, _order_by_relevance)
     order_clause = ordering_builder(use_fts)
 
@@ -143,45 +268,35 @@ def formatResults(results: list, query: str):
 
     for i, (filepath, filename, extension, preview) in enumerate(results, 1):
         lower_filename = filename.lower()
-        lower_query = query.lower()
-        filename_idx = lower_filename.find(lower_query)
+        preview_text = preview[:60].replace("\n", " ").strip() if preview else ""
 
-        if filename_idx != -1:
-            highlighted_filename = filename.replace(
-                filename[filename_idx:filename_idx + len(query)],
-                filename[filename_idx:filename_idx + len(query)]
-            )
-        else:
-            highlighted_filename = filename
-
-        if preview:
-            lower_preview = preview.lower()
-            idx = lower_preview.find(lower_query)
-
-            if idx != -1:
-                start = max(idx - 30, 0)
-                end = min(idx + len(query) + 30, len(preview))
-                snippet = preview[start:end]
-
-                highlighted = snippet.replace(
-                    preview[idx:idx + len(query)],
-                    preview[idx:idx + len(query)]
-                )
-                preview_text = highlighted.replace("\n", " ")
-            else:
-                preview_text = preview[:60].replace("\n", " ")
-        else:
-            preview_text = "No preview"
-
-        print(f"{i:<2}. {highlighted_filename:<40} | {extension:<6} | {preview_text}...")
+        print(f"{i:<2}. {lower_filename:<40} | {extension:<6} | {preview_text}...")
 
 
-def display_search_results(cursor, query: str, limit: int = 10, ranking_strategy: str = "relevance"):
+def display_search_results(
+    cursor,
+    query: str,
+    limit: int = 10,
+    ranking_strategy: str = "relevance",
+    search_subject: SearchSubject = None,
+    history_observer: SearchHistoryObserver = None,
+):
     if not query:
         return
 
     parsed_query = parseQuery(query)
     results = searchIndex(cursor, parsed_query, limit, ranking_strategy=ranking_strategy)
+    if history_observer is not None:
+        suggestions = history_observer.suggest_queries(query, limit=3)
+        suggestions = [s for s in suggestions if s != query.lower().strip()]
+        if suggestions:
+            print("Suggestions: " + " | ".join(suggestions))
+
+        results = history_observer.rerank_results(query, results)
+
+    if search_subject is not None:
+        search_subject.notify("search_executed", {"query": query, "results": results})
+
     formatResults(results, query)
 
 
@@ -190,10 +305,14 @@ def _has_indexed_content(cursor):
     return cursor.fetchone()[0] > 0
 
 
-def search_as_you_type(cursor, ranking_strategy: str = "relevance"):
+def search_as_you_type(cursor, conn, ranking_strategy: str = "relevance"):
     if not _has_indexed_content(cursor):
         print("\nNo indexed content found. Index your real file system first using --path.")
         return
+
+    search_subject = SearchSubject()
+    history_observer = SearchHistoryObserver(cursor, conn)
+    search_subject.attach(history_observer)
 
     print("\n=== Search As You Type ===")
     print("Type to search in real-time (Backspace to delete, Ctrl+C to exit)\n")
@@ -227,7 +346,13 @@ def search_as_you_type(cursor, ranking_strategy: str = "relevance"):
                     if char and char.isprintable():
                         query += char
                         print(query)
-                        display_search_results(cursor, query, ranking_strategy=ranking_strategy)
+                        display_search_results(
+                            cursor,
+                            query,
+                            ranking_strategy=ranking_strategy,
+                            search_subject=search_subject,
+                            history_observer=history_observer,
+                        )
                         print()
                 except:
                     pass
