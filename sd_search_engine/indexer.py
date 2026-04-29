@@ -41,14 +41,17 @@ def _compute_path_score(file_path: Path, root_path: Path):
 
     base_score = 0.50
 
+    # Weight calculated based on directory
     dir_weight_sum = 0.0
     for part in directory_parts:
         dir_weight_sum += directory_weights.get(part.lower(), 0.0)
     dir_weight_sum = _clamp(dir_weight_sum, -0.25, 0.25)
 
+    # Weight based on depth (more shallow = higher score)
     depth = len(directory_parts)
     depth_bonus = max(0.0, 0.20 - 0.015 * depth)
 
+    # Weight based on file extension
     ext_bonus = extension_bonus.get(file_path.suffix.lower(), 0.0)
 
     final_score = base_score + dir_weight_sum + depth_bonus + ext_bonus
