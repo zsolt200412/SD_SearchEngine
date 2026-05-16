@@ -2,8 +2,10 @@ from pathlib import Path
 import os
 import time
 from datetime import datetime
+import json
 
-from .config import ignored_extensions, ignored_folders, text_extensions
+from .config import ignored_extensions, ignored_folders, text_extensions, image_extensions
+from .file_processors import FileProcessorFactory, TextFileProcessor, ImageFileProcessor
 
 
 def _clamp(value: float, minimum: float, maximum: float):
@@ -58,10 +60,10 @@ def _compute_path_score(file_path: Path, root_path: Path):
     return _clamp(final_score, 0.0, 1.0)
 
 
-def _path_contains_ignored_folder(path: Path) -> bool:
+def _path_contains_ignored_folder(path):
     return any(part in ignored_folders for part in path.parts)
 
-def check_if_current_path_or_subdir_already_indexed(cursor, path: str) -> bool:
+def check_if_current_path_or_subdir_already_indexed(cursor, path):
     cursor.execute("SELECT path FROM stored_directories WHERE path = ?", (path,))
     if cursor.fetchone() is not None:
         return True
@@ -92,6 +94,11 @@ def crawl_and_index(cursor, conn, root_dir: str, print_paths: bool = False, md: 
         print(f"Error: Path is not a directory: {root_dir}")
         raise SystemExit(1)
 
+    # Initialize file processor factory with strategies
+    processor_factory = FileProcessorFactory()
+    processor_factory.register_processor(TextFileProcessor(text_extensions))
+    processor_factory.register_processor(ImageFileProcessor(image_extensions))
+
     start_time = time.time()
 
     def _on_walk_error(err):
@@ -117,7 +124,9 @@ def crawl_and_index(cursor, conn, root_dir: str, print_paths: bool = False, md: 
                 if _path_contains_ignored_folder(file_path):
                     continue
 
-                if file_path.suffix.lower()  not in text_extensions:
+                # Skip if no processor can handle this file
+                processor = processor_factory.get_processor(file_path)
+                if processor is None:
                     continue
 
                 files_indexed += 1
@@ -132,34 +141,57 @@ def crawl_and_index(cursor, conn, root_dir: str, print_paths: bool = False, md: 
                     if files_indexed % 10 == 0:
                         print(f'Indexed {files_indexed} files, errors: {errors}, elapsed time: {time.time() - start_time:.2f} seconds, speed: {files_indexed / (time.time() - start_time):.2f} files/sec', end='\r')
 
-                content = ""
-                preview = ""
-                if file_path.suffix.lower() in text_extensions:
-                    try:
-                        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                            content = f.read()
-                            preview = content[:50]
-                    except Exception as e:
-                        print(f"Warning: Could not read {file_path}: {e}")
-
                 try:
+                    # Process file using appropriate strategy
+                    processed_data = processor_factory.process_file(file_path)
+                    if processed_data is None:
+                        continue
+
                     path_score = _compute_path_score(file_path, root_path)
                     accessed_at = datetime.fromtimestamp(file_path.stat().st_atime).isoformat(timespec="seconds")
 
+                    # Insert into file_index with file_type
                     cursor.execute(
                         """
-                        INSERT INTO file_index (filepath, filename, extension, content, preview, modified_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        INSERT INTO file_index (filepath, filename, extension, content, preview, modified_at, file_type)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (str(file_path), file_path.name, file_path.suffix, content, preview, datetime.now()),
+                        (
+                            processed_data.filepath,
+                            processed_data.filename,
+                            processed_data.extension,
+                            processed_data.content,
+                            processed_data.preview,
+                            datetime.now(),
+                            processed_data.file_type,
+                        ),
                     )
                     cursor.execute(
                         """
                         INSERT OR REPLACE INTO file_path_scores (filepath, path_score, accessed_at)
                         VALUES (?, ?, ?)
                         """,
-                        (str(file_path), path_score, accessed_at),
+                        (processed_data.filepath, path_score, accessed_at),
                     )
+
+                    # Store color metadata for image files
+                    if processed_data.file_type == "image" and processed_data.metadata:
+                        color_palette_json = json.dumps(processed_data.metadata.get("color_palette", []))
+                        cursor.execute(
+                            """
+                            INSERT OR REPLACE INTO file_colors (filepath, file_type, dominant_color, dominant_color_name, dominant_color_hex, color_palette)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                processed_data.filepath,
+                                processed_data.file_type,
+                                str(processed_data.metadata.get("dominant_color", "")),
+                                processed_data.metadata.get("dominant_color_name", ""),
+                                processed_data.metadata.get("dominant_color_hex", ""),
+                                color_palette_json,
+                            ),
+                        )
+
                     conn.commit()
                 except Exception as e:
                     print(f"Warning: Could not insert file metadata: {e}")

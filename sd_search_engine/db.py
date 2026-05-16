@@ -25,7 +25,8 @@ def init_db(db_path="file_metadata.db"):
             extension,
             content,
             preview,
-            modified_at UNINDEXED
+            modified_at UNINDEXED,
+            file_type UNINDEXED
         );
         """
     )
@@ -55,6 +56,18 @@ def init_db(db_path="file_metadata.db"):
             hit_count INTEGER NOT NULL DEFAULT 0,
             last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (query, filepath)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS file_colors (
+            filepath TEXT PRIMARY KEY,
+            file_type TEXT NOT NULL,
+            dominant_color TEXT NOT NULL,
+            dominant_color_name TEXT NOT NULL,
+            dominant_color_hex TEXT NOT NULL,
+            color_palette TEXT NOT NULL
         )
         """
     )
