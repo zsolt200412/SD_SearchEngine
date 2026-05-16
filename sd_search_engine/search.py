@@ -2,6 +2,7 @@ import sys
 import time
 import shlex
 from datetime import datetime
+from .widgets import WidgetFactory
 
 
 def _order_by_relevance(use_fts: bool):
@@ -317,6 +318,12 @@ def display_search_results(
         search_subject.notify("search_executed", {"query": query, "results": results})
 
     formatResults(results, query)
+    
+    # Activate context-aware widgets
+    factory = WidgetFactory()
+    widgets = factory.get_widgets(results, parsed_query)
+    for widget in widgets:
+        widget.activate()
 
 
 def _has_indexed_content(cursor):
