@@ -176,6 +176,7 @@ def parseQuery(query: str):
     parsed = {
         "path_terms": [],
         "content_terms": [],
+        "color_terms": [],
         "general_terms": [],
         "raw_query": query,
     }
@@ -201,6 +202,10 @@ def parseQuery(query: str):
                 parsed["content_terms"].append(value)
                 continue
 
+            if qualifier == "color":
+                parsed["color_terms"].append(value.lower())
+                continue
+
         parsed["general_terms"].append(token)
 
     return parsed
@@ -212,6 +217,7 @@ def _build_search_statement(parsed_query: dict, limit: int, ranking_strategy: st
 
     path_terms = parsed_query["path_terms"]
     content_terms = parsed_query["content_terms"]
+    color_terms = parsed_query["color_terms"]
     general_terms = parsed_query["general_terms"]
 
     for term in path_terms:
@@ -234,17 +240,30 @@ def _build_search_statement(parsed_query: dict, limit: int, ranking_strategy: st
         where_clauses.append("file_index MATCH ?")
         params.append(fts_query)
 
+    # Handle color queries
+    if color_terms:
+        color_conditions = []
+        for color_term in color_terms:
+            color_conditions.append("file_colors.dominant_color_name LIKE ?")
+            params.append(f"%{color_term}%")
+        where_clauses.append("(" + " OR ".join(color_conditions) + ")")
+
     if not where_clauses:
         where_clauses.append("1 = 0")
 
-
     ordering_builder = RANKING_STRATEGIES.get(ranking_strategy, _order_by_relevance)
     order_clause = ordering_builder(use_fts)
+
+    # Include file_colors join if color queries are present
+    left_join_colors = ""
+    if color_terms:
+        left_join_colors = "LEFT JOIN file_colors ON file_colors.filepath = file_index.filepath"
 
     sql = f"""
         SELECT file_index.filepath, file_index.filename, file_index.extension, file_index.preview
         FROM file_index
         LEFT JOIN file_path_scores ON file_path_scores.filepath = file_index.filepath
+        {left_join_colors}
         WHERE {' AND '.join(where_clauses)}
         {order_clause}
         LIMIT ?
